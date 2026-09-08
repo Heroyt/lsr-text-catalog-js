@@ -4,7 +4,7 @@
   "description": "Unpublished skeleton for a future text catalog Vite plugin and Vue/gettext adapters; no implementation is included.",
   "private": true,
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Heroyt/lsr-text-catalog-js.git"
