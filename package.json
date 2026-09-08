@@ -1,0 +1,13 @@
+{
+  "name": "@lsr/text-catalog",
+  "version": "0.0.0",
+  "description": "Unpublished skeleton for a future text catalog Vite plugin and Vue/gettext adapters; no implementation is included.",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Heroyt/lsr-text-catalog-js.git"
+  },
+  "homepage": "https://github.com/Heroyt/lsr-text-catalog-js"
+}
