@@ -1,13 +1,13 @@
 # Text Catalog for Vue and Vite
 
-`@lsr/text-catalog` supplies typed Vue/gettext helpers and a Vite plugin for NEON source-copy catalogs compiled by the independently versioned [PHP package](https://packagist.org/packages/lsr/text-catalog).
+`lsr-text-catalog` supplies typed Vue/gettext helpers and a Vite plugin for NEON source-copy catalogs compiled by the independently versioned [PHP package](https://packagist.org/packages/lsr/text-catalog).
 
 ## Installation
 
-Install from [npm](https://www.npmjs.com/package/@lsr/text-catalog) together with its Vue/gettext peers:
+Install from [npm](https://www.npmjs.com/package/lsr-text-catalog) together with its Vue/gettext peers:
 
 ```sh
-npm install @lsr/text-catalog vue vue3-gettext
+npm install lsr-text-catalog vue vue3-gettext
 ```
 
 For Vite integration, also install the host build tools:
@@ -19,8 +19,10 @@ npm install --save-dev vite @vitejs/plugin-vue typescript
 Use the PHP compiler to generate or update catalog artifacts:
 
 ```sh
-composer require lsr/text-catalog
+composer require lsr/text-catalog:^0.1.2
 ```
+
+PHP compiler `0.1.2` introduces the unscoped TypeScript imports. Regenerate existing frontend artifacts when upgrading; do not hand-edit generated import paths.
 
 Prebuilt frontend catalogs do not require PHP at runtime. Applications supply their own HTML sanitizer; no sanitizer package is installed automatically.
 
@@ -30,10 +32,10 @@ Node `^20.19.0 || >=22.12.0`; ESM only. Host peers: Vue `^3.5.42` and vue3-gette
 
 | Export | Responsibility |
 | --- | --- |
-| `@lsr/text-catalog/runtime` | `createRuntimeCatalog`: typed dynamic source lookup, contextual/plural translation and guarded HTML rendering. |
-| `@lsr/text-catalog/compiled` | `createCompiledCatalog`: lookup-free contextual/plural/HTML adapters for transformed calls. |
-| `@lsr/text-catalog/types` | Reusable catalog, translation, interpolation and instance types. Consumer-specific key unions are generated locally. |
-| `@lsr/text-catalog/vite` | `textCatalog`: Node-only compiler orchestration, versioned artifact validation and literal transformation. |
+| `lsr-text-catalog/runtime` | `createRuntimeCatalog`: typed dynamic source lookup, contextual/plural translation and guarded HTML rendering. |
+| `lsr-text-catalog/compiled` | `createCompiledCatalog`: lookup-free contextual/plural/HTML adapters for transformed calls. |
+| `lsr-text-catalog/types` | Reusable catalog, translation, interpolation and instance types. Consumer-specific key unions are generated locally. |
+| `lsr-text-catalog/vite` | `textCatalog`: Node-only compiler orchestration, versioned artifact validation and literal transformation. |
 
 Babel, Vue compilers, MagicString and TypeScript are direct dependencies because the shipped Node plugin executes them. Browser entry points do not import the Node plugin or its filesystem/compiler modules. PHP is needed only when the consumer's compiler callback invokes it, not to use prebuilt frontend data.
 
@@ -51,7 +53,7 @@ Create a real consumer module such as `src/copy.ts`:
 
 ```ts
 import * as generated from '../generated/catalog.js';
-import { createRuntimeCatalog } from '@lsr/text-catalog/runtime';
+import { createRuntimeCatalog } from 'lsr-text-catalog/runtime';
 import { sanitizeCopyHtml } from './sanitizeCopyHtml.js';
 
 export const {
@@ -100,7 +102,7 @@ const label = computed(() => langText('example.title', { name: 'Ada' }));
 import { execFileSync } from 'node:child_process';
 import vue from '@vitejs/plugin-vue';
 import { defineConfig } from 'vite';
-import { textCatalog } from '@lsr/text-catalog/vite';
+import { textCatalog } from 'lsr-text-catalog/vite';
 
 export default defineConfig({
   plugins: [
@@ -135,7 +137,7 @@ Add `src/copy.compiled.ts`:
 
 ```ts
 import * as generated from '../generated/catalog.compiled.js';
-import { createCompiledCatalog } from '@lsr/text-catalog/compiled';
+import { createCompiledCatalog } from 'lsr-text-catalog/compiled';
 import { sanitizeCopyHtml } from './sanitizeCopyHtml.js';
 
 export const {
@@ -179,4 +181,4 @@ The skill is guidance, not a runtime dependency; installing it does not install 
 
 [MIT](LICENSE), copyright (c) 2026 Tomáš Vojík. Source and issue tracking: [Heroyt/lsr-text-catalog-js](https://github.com/Heroyt/lsr-text-catalog-js). npm releases are independent of PHP/Packagist releases and artifact format versions.
 
-The manifest targets public publication on `https://registry.npmjs.org/`. Build and inspect the tarball with `npm pack` before a release; packing or creating a Git tag does not publish it. Registry scope ownership, credentials and release authorization are maintainer prerequisites.
+The manifest targets public publication on `https://registry.npmjs.org/`. Build and inspect the tarball with `npm pack` before a release; packing or creating a Git tag does not publish it. Publishing credentials and release authorization are maintainer prerequisites.
