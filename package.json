@@ -1,6 +1,6 @@
 {
   "name": "@lsr/text-catalog",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Typed Vue/gettext catalogs with coherent runtime and literal-compiled Vite modes.",
   "type": "module",
   "license": "MIT",
