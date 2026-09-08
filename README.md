@@ -171,4 +171,6 @@ During verification, Vite emitted an upstream browser-externalization warning fo
 
 [MIT](LICENSE), copyright (c) 2026 Tomáš Vojík. Source and issue tracking: [Heroyt/lsr-text-catalog-js](https://github.com/Heroyt/lsr-text-catalog-js). npm releases are independent of PHP/Packagist releases and artifact format versions.
 
+Release `0.1.0` targets Git tag `v0.1.0` and artifact format 1. The maintainer confirmed source-application verification with both the PHP and npm packages symlinked locally. Git release preparation does not itself publish the npm package.
+
 The manifest targets public publication on `https://registry.npmjs.org/`. Build and inspect the tarball with `npm pack` before a release; packing does not publish it. Registry scope ownership, credentials and release authorization are maintainer prerequisites. Current publication state and release gates are recorded in the [extraction record](https://github.com/Heroyt/lsr-text-catalog/blob/master/docs/extraction-plan.md).
