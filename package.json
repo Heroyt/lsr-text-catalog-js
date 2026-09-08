@@ -1,6 +1,6 @@
 {
   "name": "lsr-text-catalog",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Typed Vue/gettext catalogs with coherent runtime and literal-compiled Vite modes.",
   "keywords": [
     "vue",
