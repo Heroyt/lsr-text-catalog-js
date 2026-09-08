@@ -1,7 +1,7 @@
 {
   "name": "@lsr/text-catalog",
   "version": "0.0.0",
-  "description": "Unpublished skeleton for a future text catalog Vite plugin and Vue/gettext adapters; no implementation is included.",
+  "description": "Typed Vue/gettext catalogs with coherent runtime and literal-compiled Vite modes.",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -9,5 +9,71 @@
     "type": "git",
     "url": "git+https://github.com/Heroyt/lsr-text-catalog-js.git"
   },
-  "homepage": "https://github.com/Heroyt/lsr-text-catalog-js"
+  "homepage": "https://github.com/Heroyt/lsr-text-catalog-js",
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "exports": {
+    "./runtime": {
+      "types": "./dist/runtime/index.d.ts",
+      "import": "./dist/runtime/index.js"
+    },
+    "./compiled": {
+      "types": "./dist/compiled/index.d.ts",
+      "import": "./dist/compiled/index.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./vite": {
+      "types": "./dist/vite/index.d.ts",
+      "import": "./dist/vite/index.js"
+    }
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "format": "prettier --write src tests package.json tsconfig*.json vitest.config.ts",
+    "format:check": "prettier --check src tests package.json tsconfig*.json vitest.config.ts",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.29.8",
+    "@babel/traverse": "^7.29.8",
+    "@babel/types": "^7.29.8",
+    "@vue/compiler-dom": "^3.5.42",
+    "@vue/compiler-sfc": "^3.5.42",
+    "magic-string": "^0.30.21",
+    "typescript": "^6.0.3"
+  },
+  "peerDependencies": {
+    "vite": "^8.2.2",
+    "vue": "^3.5.42",
+    "vue3-gettext": "^4.0.1"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@jridgewell/trace-mapping": "^0.3.31",
+    "@types/babel__traverse": "^7.28.0",
+    "@types/node": "^26.4.1",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/server-renderer": "^3.5.42",
+    "happy-dom": "^20.13.2",
+    "prettier": "^3.9.6",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11",
+    "vue": "^3.5.42",
+    "vue3-gettext": "^4.0.1"
+  }
 }
