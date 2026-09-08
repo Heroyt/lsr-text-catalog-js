@@ -1,8 +1,30 @@
 # Text Catalog for Vue and Vite
 
-`@lsr/text-catalog` supplies typed Vue/gettext helpers and a Vite plugin for NEON source-copy catalogs compiled by the independently versioned [PHP package](https://github.com/Heroyt/lsr-text-catalog). The implementation is extracted and locally verified. **`private: true` and version `0.0.0` remain publication safeguards, not a release.**
+`@lsr/text-catalog` supplies typed Vue/gettext helpers and a Vite plugin for NEON source-copy catalogs compiled by the independently versioned [PHP package](https://packagist.org/packages/lsr/text-catalog).
 
 The behavioral reference is [code-hunt-game ADR 0007](https://github.com/eSoul-cz/code-hunt-game/blob/master/docs/adr/0007-neon-source-copy-catalog-with-gettext.md), reviewed at `4aa85bce33f6846c0213f62574e779040cd01d23`. The reference application was not modified. The shared [extraction record and release gates](https://github.com/Heroyt/lsr-text-catalog/blob/master/docs/extraction-plan.md) live in the PHP repository; no sibling file is required at runtime.
+
+## Installation
+
+Install from [npm](https://www.npmjs.com/package/@lsr/text-catalog) together with its Vue/gettext peers:
+
+```sh
+npm install @lsr/text-catalog vue vue3-gettext
+```
+
+For Vite integration, also install the host build tools:
+
+```sh
+npm install --save-dev vite @vitejs/plugin-vue typescript
+```
+
+Use the PHP compiler to generate or update catalog artifacts:
+
+```sh
+composer require lsr/text-catalog
+```
+
+Prebuilt frontend catalogs do not require PHP at runtime. Applications supply their own HTML sanitizer; no sanitizer package is installed automatically.
 
 ## Requirements and exports
 
@@ -17,7 +39,7 @@ Node `^20.19.0 || >=22.12.0`; ESM only. Host peers: Vue `^3.5.42` and vue3-gette
 
 Babel, Vue compilers, MagicString and TypeScript are direct dependencies because the shipped Node plugin executes them. Browser entry points do not import the Node plugin or its filesystem/compiler modules. PHP is needed only when the consumer's compiler callback invokes it, not to use prebuilt frontend data.
 
-Build before linking a checkout with pnpm `link:`. Local tarballs are also installable while the package is private. No registry publication or application installation is performed by this repository.
+For local package development, build before linking a checkout with pnpm `link:`. Consumer applications should normally install a released npm version instead of a local link.
 
 ## Generate consumer-owned artifacts
 
@@ -141,10 +163,12 @@ pnpm run format
 npm pack --dry-run --ignore-scripts --json
 ```
 
-The build emits ESM and declarations into `dist`; package exports point only at these files. `prepack` rebuilds them. Tests cover runtime/request isolation, source-map and macro boundaries, manifest validation, real Vite client/SSR/custom-environment lifecycle and native build-watch behavior with synthetic inputs. The external-consumer gate additionally runs the actual PHP compiler and browser hydration in both modes.
+The build emits ESM and declarations into `dist`; package exports point only at these files. `prepack` rebuilds them. The npm tarball also includes `src` so JavaScript and declaration source maps resolve to the original TypeScript. Tests cover runtime/request isolation, source-map and macro boundaries, manifest validation, real Vite client/SSR/custom-environment lifecycle and native build-watch behavior with synthetic inputs. The external-consumer gate additionally runs the actual PHP compiler and browser hydration in both modes.
 
 During verification, Vite emitted an upstream browser-externalization warning for `fs` from `pofile 1.1.4`, a dependency of `vue3-gettext 4.0.1`. Both production modes and SSR hydration passed without browser console errors. The package's browser entries do not import its Node plugin; recheck the upstream warning when choosing release peer versions rather than suppressing it globally.
 
-## License and publication
+## License and maintenance
 
-[MIT](LICENSE), copyright (c) 2026 Tomáš Vojík. Extraction and licensing were authorized; the reference application's license remains unchanged. Origin: [Heroyt/lsr-text-catalog-js](https://github.com/Heroyt/lsr-text-catalog-js). Keep the private flag until registry scope/name ownership, release approval and release gates are settled. Versioning/publication are independent of Composer/Satis; no push, tag, npm publication or application migration is included.
+[MIT](LICENSE), copyright (c) 2026 Tomáš Vojík. Source and issue tracking: [Heroyt/lsr-text-catalog-js](https://github.com/Heroyt/lsr-text-catalog-js). npm releases are independent of PHP/Packagist releases and artifact format versions.
+
+The manifest targets public publication on `https://registry.npmjs.org/`. Build and inspect the tarball with `npm pack` before a release; packing does not publish it. Registry scope ownership, credentials and release authorization are maintainer prerequisites. Current publication state and release gates are recorded in the [extraction record](https://github.com/Heroyt/lsr-text-catalog/blob/master/docs/extraction-plan.md).
