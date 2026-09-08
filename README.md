@@ -2,8 +2,6 @@
 
 `@lsr/text-catalog` supplies typed Vue/gettext helpers and a Vite plugin for NEON source-copy catalogs compiled by the independently versioned [PHP package](https://packagist.org/packages/lsr/text-catalog).
 
-The behavioral reference is [code-hunt-game ADR 0007](https://github.com/eSoul-cz/code-hunt-game/blob/master/docs/adr/0007-neon-source-copy-catalog-with-gettext.md), reviewed at `4aa85bce33f6846c0213f62574e779040cd01d23`. The reference application was not modified. The shared [extraction record and release gates](https://github.com/Heroyt/lsr-text-catalog/blob/master/docs/extraction-plan.md) live in the PHP repository; no sibling file is required at runtime.
-
 ## Installation
 
 Install from [npm](https://www.npmjs.com/package/@lsr/text-catalog) together with its Vue/gettext peers:
@@ -125,7 +123,7 @@ export default defineConfig({
 });
 ```
 
-Paths are relative to the configured Vite root (or explicit `root`) unless absolute. The callback may return a promise; the consumer owns its command, environment and bootstrap. Plugin and PHP identity/output configuration must agree. No game-specific command, domain, locale, alias or environment defaults are injected.
+Paths are relative to the configured Vite root (or explicit `root`) unless absolute. The callback may return a promise; the consumer owns its command, environment and bootstrap. Plugin and PHP identity/output configuration must agree. No application-specific command, domain, locale, alias or environment defaults are injected.
 
 The plugin validates **artifact format 1**: identity, source/HTML/plural references, exact artifact-byte SHA-256 digests and the canonical generation digest. Missing/unknown formats, tampering and mixed generations fail before output is used. A successful compiler callback alone is not sufficient. Client, SSR and custom environments use the same validated generation, and stale in-flight generations are not published.
 
@@ -149,7 +147,7 @@ Keep authored imports pointed at `src/copy.ts`; set `mode: 'compiled'`. The plug
 
 Compiled mode is deliberately stricter: dynamic keys, first-class helper escapes, unsupported import/SFC/macro forms, mismatched plurals and ineligible HTML calls are errors. Unrelated lexical bindings are not rewritten. Non-key argument evaluation order, source maps, contextual translation and interpolation are preserved. Generated compiled `text` is declaration-only and must not escape the transform into JavaScript execution.
 
-Application sanitizers remain responsible for final-output safety in both modes, including SSR DOM lifetimes. This package does not import DOMPurify, jsdom, Inertia or the reference application's HTML policy.
+Application sanitizers remain responsible for final-output safety in both modes, including SSR DOM lifetimes. This package does not import DOMPurify, jsdom or Inertia and supplies no application-specific HTML policy.
 
 ## Development
 
@@ -163,14 +161,22 @@ pnpm run format
 npm pack --dry-run --ignore-scripts --json
 ```
 
-The build emits ESM and declarations into `dist`; package exports point only at these files. `prepack` rebuilds them. The npm tarball also includes `src` so JavaScript and declaration source maps resolve to the original TypeScript. Tests cover runtime/request isolation, source-map and macro boundaries, manifest validation, real Vite client/SSR/custom-environment lifecycle and native build-watch behavior with synthetic inputs. The external-consumer gate additionally runs the actual PHP compiler and browser hydration in both modes.
+The build emits ESM and declarations into `dist`; package exports point only at these files. `prepack` rebuilds them. The npm tarball also includes `src` so JavaScript and declaration source maps resolve to the original TypeScript. Tests cover runtime/request isolation, source-map and macro boundaries, manifest validation, real Vite client/SSR/custom-environment lifecycle and native build-watch behavior with synthetic inputs. Consumer verification should additionally exercise the actual PHP compiler and browser hydration in each supported mode.
 
 During verification, Vite emitted an upstream browser-externalization warning for `fs` from `pofile 1.1.4`, a dependency of `vue3-gettext 4.0.1`. Both production modes and SSR hydration passed without browser console errors. The package's browser entries do not import its Node plugin; recheck the upstream warning when choosing release peer versions rather than suppressing it globally.
+
+## Agent skill
+
+Use the [lsr-text-catalog skill](https://github.com/Heroyt/lsr-skills/tree/master/skills/lsr-text-catalog) for generated artifacts, runtime/compiled mode selection, per-app/SSR catalog instances and application-owned sanitization.
+
+```sh
+npx skills add Heroyt/lsr-skills --skill lsr-text-catalog
+```
+
+The skill is guidance, not a runtime dependency; installing it does not install or publish either package.
 
 ## License and maintenance
 
 [MIT](LICENSE), copyright (c) 2026 Tomáš Vojík. Source and issue tracking: [Heroyt/lsr-text-catalog-js](https://github.com/Heroyt/lsr-text-catalog-js). npm releases are independent of PHP/Packagist releases and artifact format versions.
 
-Release `0.1.0` targets Git tag `v0.1.0` and artifact format 1. The maintainer confirmed source-application verification with both the PHP and npm packages symlinked locally. Git release preparation does not itself publish the npm package.
-
-The manifest targets public publication on `https://registry.npmjs.org/`. Build and inspect the tarball with `npm pack` before a release; packing does not publish it. Registry scope ownership, credentials and release authorization are maintainer prerequisites. Current publication state and release gates are recorded in the [extraction record](https://github.com/Heroyt/lsr-text-catalog/blob/master/docs/extraction-plan.md).
+The manifest targets public publication on `https://registry.npmjs.org/`. Build and inspect the tarball with `npm pack` before a release; packing or creating a Git tag does not publish it. Registry scope ownership, credentials and release authorization are maintainer prerequisites.
