@@ -2,23 +2,25 @@
   "name": "@lsr/text-catalog",
   "version": "0.1.1",
   "description": "Typed Vue/gettext catalogs with coherent runtime and literal-compiled Vite modes.",
-  "type": "module",
-  "license": "MIT",
+  "keywords": [
+    "vue",
+    "gettext",
+    "vite",
+    "lsr",
+    "text",
+    "localisation"
+  ],
+  "homepage": "https://github.com/Heroyt/lsr-text-catalog-js",
+  "bugs": {
+    "url": "https://github.com/Heroyt/lsr-text-catalog-js/issues"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Heroyt/lsr-text-catalog-js.git"
   },
-  "homepage": "https://github.com/Heroyt/lsr-text-catalog-js",
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
-  },
-  "files": [
-    "dist",
-    "src",
-    "LICENSE",
-    "README.md"
-  ],
+  "license": "MIT",
+  "author": "Tomáš Vojík",
+  "type": "module",
   "exports": {
     "./runtime": {
       "types": "./dist/runtime/index.d.ts",
@@ -37,9 +39,16 @@
       "import": "./dist/vite/index.js"
     }
   },
-  "engines": {
-    "node": "^20.19.0 || >=22.12.0"
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
   },
+  "files": [
+    "dist",
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -57,16 +66,6 @@
     "magic-string": "^0.30.21",
     "typescript": "^6.0.3"
   },
-  "peerDependencies": {
-    "vite": "^8.2.2",
-    "vue": "^3.5.42",
-    "vue3-gettext": "^4.0.1"
-  },
-  "peerDependenciesMeta": {
-    "vite": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@jridgewell/trace-mapping": "^0.3.31",
     "@types/babel__traverse": "^7.28.0",
@@ -79,5 +78,22 @@
     "vitest": "^4.1.11",
     "vue": "^3.5.42",
     "vue3-gettext": "^4.0.1"
+  },
+  "peerDependencies": {
+    "vite": "^8.2.2",
+    "vue": "^3.5.42",
+    "vue3-gettext": "^4.0.1"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }
