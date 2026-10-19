@@ -23,7 +23,7 @@ import {
   registerTS,
   type SFCDescriptor,
 } from "@vue/compiler-sfc";
-
+import { catalogGroup } from "../group.js";
 import type {
   CatalogModule,
   TextCatalogSnapshot,
@@ -38,6 +38,9 @@ const traverse: Traverse =
     ? (traverseModule as Traverse)
     : babelTraverse.default;
 registerTS(() => ts);
+
+/** Side-effect modules that top-level-await their catalog group before the importing module runs. */
+export const groupModulePrefix = "virtual:lsr-text-catalog/group/";
 
 type Macro = "text" | "langText" | "langTextPlural" | "langHtmlText";
 type RuntimeHelper = "pgettext" | "npgettext" | "htmlPgettext";
@@ -233,6 +236,9 @@ export async function transformTextCatalog(
     });
     throw error;
   }
+
+  // Translated literal keys need their lazily loaded group; source-only `text` expansions do not.
+  const usedGroups = new Set<string>();
 
   const moduleIdentities = new Map<string, CatalogModule | undefined>();
   function moduleIdentity(specifier: string): CatalogModule | undefined {
@@ -628,6 +634,7 @@ export async function transformTextCatalog(
             );
           values = [key, snapshot.texts[key]!];
         }
+        if (macro !== "text") usedGroups.add(catalogGroup(values[0]!));
         if (macro === "text") {
           replace(
             region,
@@ -1215,7 +1222,37 @@ export async function transformTextCatalog(
       );
     }
   }
+  if (usedGroups.size && options.groupImports) {
+    const imports = groupImportCode(usedGroups);
+    const script =
+      extension === ".vue" ? (setupScript ?? normalScript) : scripts[0];
+    if (script) {
+      output.appendLeft(
+        script.offset + (script.ast.program.interpreter?.end ?? 0),
+        `\n${imports}\n`,
+      );
+    } else {
+      // Template-only SFC (external/preprocessed scripts with macros were rejected above).
+      output.append(`\n<script>\n${imports}\n</script>\n`);
+    }
+    changed = true;
+  }
   if (!changed) return null;
+  return transformResult(output, id, source);
+}
+
+function groupImportCode(groups: Iterable<string>): string {
+  return [...groups]
+    .sort()
+    .map((group) => `import ${JSON.stringify(groupModulePrefix + group)};`)
+    .join("\n");
+}
+
+function transformResult(
+  output: MagicString,
+  id: string,
+  source: string,
+): TransformResult {
   const map = output.generateMap({
     source: id,
     includeContent: true,
@@ -1225,4 +1262,53 @@ export async function transformTextCatalog(
     code: output.toString(),
     map: Object.assign(map, { sourcesContent: map.sourcesContent ?? [source] }),
   };
+}
+
+// A quoted catalog key: camelCase segments joined by dots, without interpolation.
+const keyLiteral = /(["'`])([a-z][A-Za-z0-9]*(?:\.[a-z][A-Za-z0-9]*)*)\1/gu;
+
+/**
+ * Runtime mode: import the group of every string literal naming a catalog key, so literal calls and
+ * finite literal-key maps load their groups implicitly. Keys assembled at run time still need
+ * an explicit `loadTexts()`. Calls are not rewritten.
+ */
+export function importLiteralKeyGroups(
+  source: string,
+  id: string,
+  snapshot: TextCatalogSnapshot,
+): TransformResult | null {
+  if (
+    /[?#\0]/u.test(id) ||
+    id.startsWith("virtual:") ||
+    /[/\\]node_modules[/\\]/u.test(id)
+  )
+    return null;
+  const extension = extname(id);
+  if (extension !== ".vue" && !Object.hasOwn(scriptExtensions, extension))
+    return null;
+  const groups = new Set<string>();
+  for (const [, , key] of source.matchAll(keyLiteral))
+    if (Object.hasOwn(snapshot.texts, key!)) groups.add(catalogGroup(key!));
+  if (!groups.size) return null;
+  const imports = groupImportCode(groups);
+  const output = new MagicString(source);
+  if (extension === ".vue") {
+    const { descriptor } = parseSfc(source, { filename: id });
+    const block = descriptor.scriptSetup ?? descriptor.script;
+    if (block) {
+      // External or preprocessed scripts cannot take an import; such components load explicitly.
+      if (block.src || !Object.hasOwn(scriptLanguages, block.lang ?? "js"))
+        return null;
+      output.appendLeft(block.loc.start.offset, `\n${imports}\n`);
+    } else output.append(`\n<script>\n${imports}\n</script>\n`);
+  } else {
+    const line = source.indexOf("\n");
+    const start = !source.startsWith("#!")
+      ? 0
+      : line < 0
+        ? source.length
+        : line + 1;
+    output.appendLeft(start, `${imports}\n`);
+  }
+  return transformResult(output, id, source);
 }

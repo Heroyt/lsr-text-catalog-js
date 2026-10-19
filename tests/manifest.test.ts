@@ -1,9 +1,28 @@
 import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { readCatalogManifest } from "../src/vite/manifest.js";
 import { identity, publishCatalog } from "./fixtures.js";
+
+// Lets a test serve one stale manifest read, as if another process republished meanwhile.
+const staleReads = new Map<string, string>();
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...fs,
+    readFileSync: ((file: string, ...rest: unknown[]) => {
+      const stale = staleReads.get(String(file));
+      if (stale === undefined)
+        return (fs.readFileSync as (...args: unknown[]) => unknown)(
+          file,
+          ...rest,
+        );
+      staleReads.delete(String(file));
+      return stale;
+    }) as typeof fs.readFileSync,
+  };
+});
 
 const cleanup: string[] = [];
 const snapshot = {
@@ -16,14 +35,26 @@ const snapshot = {
   htmlKeys: { html: true as const },
   plurals: { items: { one: "items.one", plural: "items.plural" } },
 };
+// One target locale, so every group also carries a translation artifact.
+const bilingual = { ...identity, locales: ["en_US", "cs_CZ"] };
+const czech = 'export default {"Safe":{"html":"Bezpečné"}};\n';
 async function fixture() {
   const directory = await mkdtemp(
     path.join(os.tmpdir(), "text-catalog-manifest-"),
   );
   cleanup.push(directory);
   const runtime = 'export const text = () => "Hello";\n';
-  const compiled = "export const catalogTranslations = {};\n";
-  const manifest = await publishCatalog(directory, snapshot, runtime, compiled);
+  const compiled = "export const catalogGroups = {};\n";
+  const manifest = await publishCatalog(
+    directory,
+    snapshot,
+    runtime,
+    compiled,
+    {
+      identity: bilingual,
+      files: { "texts/html.cs_CZ.ts": czech },
+    },
+  );
   return { directory, manifest, runtime, compiled };
 }
 afterEach(async () => {
@@ -31,24 +62,33 @@ afterEach(async () => {
     await rm(directory, { recursive: true, force: true });
 });
 
-describe("catalog format v1", () => {
+describe("catalog format v2", () => {
   it("accepts a coherent generation with Unicode, line terminators, empty objects and exact artifact bytes", async () => {
     const state = await fixture();
-    const read = readCatalogManifest(state.directory, identity);
+    const read = readCatalogManifest(state.directory, bilingual);
     expect(read.manifest.texts["copy.title"]).toBe(
       snapshot.texts["copy.title"],
     );
     expect(read.runtime).toBe(state.runtime);
     expect(read.compiled).toBe(state.compiled);
+    expect(Object.keys(read.groups).sort()).toEqual([
+      "texts/copy.cs_CZ.ts",
+      "texts/copy.ts",
+      "texts/html.cs_CZ.ts",
+      "texts/html.ts",
+      "texts/items.cs_CZ.ts",
+      "texts/items.ts",
+    ]);
+    expect(read.groups["texts/html.cs_CZ.ts"]).toBe(czech);
     await publishCatalog(
       state.directory,
       { texts: {}, htmlKeys: {}, plurals: {} },
       state.runtime,
       state.compiled,
     );
-    expect(
-      readCatalogManifest(state.directory, identity).manifest.texts,
-    ).toEqual({});
+    const empty = readCatalogManifest(state.directory, identity);
+    expect(empty.manifest.texts).toEqual({});
+    expect(empty.groups).toEqual({});
   });
 
   it.each([
@@ -60,9 +100,61 @@ describe("catalog format v1", () => {
       /formatVersion/,
     ],
     [
+      "previous monolithic version",
+      (manifest: Record<string, any>) => {
+        manifest.formatVersion = 1;
+      },
+      /formatVersion/,
+    ],
+    [
+      "group artifact corruption",
+      (manifest: Record<string, any>) => {
+        manifest.artifacts.groups.items.translations.cs_CZ.sha256 = "0".repeat(
+          64,
+        );
+      },
+      /group items cs_CZ artifact digest/,
+    ],
+    [
+      "missing group",
+      (manifest: Record<string, any>) => {
+        delete manifest.artifacts.groups.copy;
+      },
+      /group artifacts do not match/,
+    ],
+    [
+      "foreign group",
+      (manifest: Record<string, any>) => {
+        manifest.artifacts.groups.extra = manifest.artifacts.groups.copy;
+      },
+      /group artifacts do not match/,
+    ],
+    [
+      "source-locale translations",
+      (manifest: Record<string, any>) => {
+        manifest.artifacts.groups.copy.translations.en_US =
+          manifest.artifacts.groups.copy.translations.cs_CZ;
+      },
+      /non-source locales/,
+    ],
+    [
+      "unsafe group path",
+      (manifest: Record<string, any>) => {
+        manifest.artifacts.groups.copy.source.path = "../texts/copy.ts";
+      },
+      /Unsafe/,
+    ],
+    [
+      "group path of another role",
+      (manifest: Record<string, any>) => {
+        manifest.artifacts.groups.copy.source.path = "texts/items.ts";
+      },
+      /Unsafe/,
+    ],
+    [
       "future version",
       (manifest: Record<string, any>) => {
-        manifest.formatVersion = 2;
+        manifest.formatVersion = 3;
       },
       /formatVersion/,
     ],
@@ -145,11 +237,32 @@ describe("catalog format v1", () => {
         path.join(state.directory, "catalog.build.json"),
         JSON.stringify(state.manifest),
       );
-      expect(() => readCatalogManifest(state.directory, identity)).toThrow(
+      expect(() => readCatalogManifest(state.directory, bilingual)).toThrow(
         error,
       );
     },
   );
+
+  it("retries once with the newer generation when artifacts were replaced while reading", async () => {
+    const state = await fixture();
+    const manifestFile = path.join(state.directory, "catalog.build.json");
+    const older = await readFile(manifestFile, "utf8");
+    const runtime = 'export const text = () => "Replaced";\n';
+    await publishCatalog(state.directory, snapshot, runtime, state.compiled, {
+      identity: bilingual,
+      files: { "texts/html.cs_CZ.ts": czech },
+    });
+    // The first read sees the previous manifest, whose digests no longer match the files.
+    staleReads.set(manifestFile, older);
+    expect(readCatalogManifest(state.directory, bilingual).runtime).toBe(
+      runtime,
+    );
+    // An unchanged manifest gets no second attempt.
+    await writeFile(path.join(state.directory, "catalog.ts"), "tampered");
+    expect(() => readCatalogManifest(state.directory, bilingual)).toThrow(
+      /runtime artifact digest mismatch/,
+    );
+  });
 
   it("rejects modified artifacts even while an older valid manifest remains present", async () => {
     const state = await fixture();
@@ -157,8 +270,16 @@ describe("catalog format v1", () => {
       path.join(state.directory, "catalog.compiled.ts"),
       state.compiled + "\n",
     );
-    expect(() => readCatalogManifest(state.directory, identity)).toThrow(
+    expect(() => readCatalogManifest(state.directory, bilingual)).toThrow(
       /compiled artifact digest mismatch/,
+    );
+    const fresh = await fixture();
+    await writeFile(
+      path.join(fresh.directory, "texts/html.cs_CZ.ts"),
+      'export default {"Safe":{"html":"<img onerror>"}};\n',
+    );
+    expect(() => readCatalogManifest(fresh.directory, bilingual)).toThrow(
+      /group html cs_CZ artifact digest mismatch/,
     );
   });
 
@@ -175,7 +296,7 @@ describe("catalog format v1", () => {
     );
     await rm(path.join(state.directory, "catalog.ts"));
     await symlink(target, path.join(state.directory, "catalog.ts"));
-    expect(() => readCatalogManifest(state.directory, identity)).toThrow(
+    expect(() => readCatalogManifest(state.directory, bilingual)).toThrow(
       /Unsafe/,
     );
   });

@@ -19,6 +19,11 @@ export interface TextCatalogTransformOptions {
   readonly root: string;
   /** Resolved consumer authoring facade used for emitted runtime-adapter imports. */
   readonly facade: string;
+  /**
+   * Import each translated group's loader module. Off when the catalog has no non-source locale:
+   * compiled calls then need no lazily loaded data at all.
+   */
+  readonly groupImports: boolean;
   /** Resolve module identities through Vite, not through guessed aliases or filenames. */
   readonly resolveModule: (
     specifier: string,

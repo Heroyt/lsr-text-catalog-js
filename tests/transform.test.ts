@@ -8,18 +8,11 @@ import * as Vue from "vue";
 import { compileScript, compileTemplate, parse } from "vue/compiler-sfc";
 
 import { createCompiledCatalog } from "../src/compiled/index.js";
-const {
-  createCatalog: createProductCopy,
-  htmlPgettext,
-  installCatalog: installProductCopy,
-  npgettext,
-  pgettext,
-} = createCompiledCatalog({
-  catalogTranslations: {},
-  sourceLocale: "en_US",
-  locales: ["en_US", "en", "de_DE"],
-});
-import { transformTextCatalog } from "../src/vite/transform.js";
+import {
+  groupModulePrefix,
+  importLiteralKeyGroups,
+  transformTextCatalog,
+} from "../src/vite/transform.js";
 import type { TextCatalogSnapshot } from "../src/vite/types.js";
 
 const { createApp: createActualApp } = await vi.importActual<typeof Vue>("vue");
@@ -42,10 +35,34 @@ const snapshot: TextCatalogSnapshot = {
   htmlKeys: { html: true },
   plurals: { items: { one: "items.one", plural: "items.plural" } },
 };
+const groupNames = [
+  ...new Set(Object.keys(snapshot.texts).map((key) => key.split(".")[0]!)),
+];
+const empty = async () => ({ default: {} });
+const facade = createCompiledCatalog({
+  catalogGroups: Object.fromEntries(
+    groupNames.map((group) => [
+      group,
+      { translations: { en: empty, de_DE: empty } },
+    ]),
+  ),
+  sourceLocale: "en_US",
+  locales: ["en_US", "en", "de_DE"],
+});
+await facade.loadTexts();
+await Promise.all([facade.loadLocale("en"), facade.loadLocale("de_DE")]);
+const {
+  createCatalog: createProductCopy,
+  htmlPgettext,
+  installCatalog: installProductCopy,
+  npgettext,
+  pgettext,
+} = facade;
 const runtime = { pgettext, npgettext, htmlPgettext };
 const transformOptions = {
   root,
   facade: "/project/src/copy.ts",
+  groupImports: true,
   resolveModule: (source: string): "copy" | "catalog" | undefined => {
     if (["#copy", "./copy", "/project/src/copy.ts"].includes(source))
       return "copy";
@@ -90,6 +107,7 @@ function evaluate<T>(source: string, extras: Record<string, unknown> = {}): T {
   };
   new Function("require", "exports", "module", compiled.outputText)(
     (name: string) => {
+      if (name.startsWith(groupModulePrefix)) return {};
       if (!Object.hasOwn(modules, name))
         throw new Error(`Unexpected runtime import: ${name}`);
       return modules[name];
@@ -194,6 +212,89 @@ describe("Text catalog source compiler", () => {
       ).code,
     );
     expect(result.values).toEqual(["Plain source", "Hello Ada", "Direct"]);
+  });
+
+  it("imports exactly the catalog groups whose translations a module renders", async () => {
+    const groups = (code: string) =>
+      [
+        ...code.matchAll(
+          /import "virtual:lsr-text-catalog\/group\/([^"]+)";/gu,
+        ),
+      ].map((match) => match[1]);
+    const translated = await expand(`
+            import { langText, langTextPlural, text } from '#copy';
+            export const values = [text('plain'), langText('greeting', { name: 'Ada' }), langTextPlural('items.one', 'items.plural', 2, { n: 2 }), langText('greeting')];
+        `);
+    expect(groups(translated.code)).toEqual(["greeting", "items"]);
+    const sourceOnly = await expand(
+      `import { text } from '#catalog'; export const value = text('plain');`,
+    );
+    expect(groups(sourceOnly.code)).toEqual([]);
+    // Source-locale-only catalogs need no lazily loaded data, hence no loader modules.
+    const singleLocale = await transformTextCatalog(
+      `import { langText } from '#copy'; export const value = langText('greeting');`,
+      `${root}/src/fixture.ts`,
+      snapshot,
+      { ...transformOptions, groupImports: false },
+    );
+    expect(singleLocale?.code).toContain("pgettext as __textCatalog_pgettext");
+    expect(groups(singleLocale!.code)).toEqual([]);
+  });
+
+  it("imports runtime groups of every literal catalog key, including finite selector maps", () => {
+    const groups = (code = "") =>
+      [
+        ...code.matchAll(
+          /import "virtual:lsr-text-catalog\/group\/([^"]+)";/gu,
+        ),
+      ].map((match) => match[1]);
+    const script = importLiteralKeyGroups(
+      `#!/usr/bin/env node
+import { langText } from '#copy';
+const labels = { a: "items.one", b: \`plain\` } as const;
+export const label = (which: 'a' | 'b', key: string) => [langText(labels[which]), langText(key), 'not.a.key', "Hello %{name}"];
+`,
+      `${root}/src/fixture.ts`,
+      snapshot,
+    );
+    expect(script?.code.startsWith("#!/usr/bin/env node\nimport")).toBe(true);
+    expect(groups(script?.code)).toEqual(["items", "plain"]);
+    expect(
+      importLiteralKeyGroups(
+        `export const value = 'not.a.key';`,
+        `${root}/src/none.ts`,
+        snapshot,
+      ),
+    ).toBeNull();
+    const templateOnly = importLiteralKeyGroups(
+      `<template><p>{{ $langText('greeting') }}</p></template>`,
+      `${root}/src/Fixture.vue`,
+      snapshot,
+    );
+    expect(parse(templateOnly!.code).descriptor.script?.content.trim()).toBe(
+      `import "${groupModulePrefix}greeting";`,
+    );
+    const setup = importLiteralKeyGroups(
+      `<script setup lang="ts">const key = 'other';</script><template>{{ $langText(key) }}</template>`,
+      `${root}/src/Fixture.vue`,
+      snapshot,
+    );
+    const { descriptor } = parse(setup!.code);
+    expect(descriptor.script).toBeNull();
+    expect(groups(descriptor.scriptSetup?.content)).toEqual(["other"]);
+  });
+
+  it("gives template-only components a module script that imports their groups", async () => {
+    const source = `<template><p>{{ $langText('greeting', { name: 'Ada' }) }}</p></template>`;
+    const { descriptor } = parse(
+      (await expand(source, `${root}/src/Fixture.vue`)).code,
+    );
+    expect(descriptor.script?.content.trim()).toBe(
+      `import "${groupModulePrefix}greeting";`,
+    );
+    const app = Vue.createSSRApp(await component(source, true));
+    installProductCopy(app, createProductCopy({ locale: "de_DE" }));
+    expect(await serverRenderer.renderToString(app)).toBe("<p>Hello Ada</p>");
   });
 
   it("preserves literal data exactly in scripts, including source-only interpolation placeholders", async () => {

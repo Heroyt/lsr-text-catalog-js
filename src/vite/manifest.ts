@@ -1,18 +1,39 @@
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
+import { catalogGroup } from "../group.js";
 import type { CatalogIdentity, TextCatalogSnapshot } from "./types.js";
 
+interface Artifact<Path extends string = string> {
+  readonly path: Path;
+  readonly sha256: string;
+}
+
 export interface CatalogManifest extends TextCatalogSnapshot, CatalogIdentity {
-  readonly formatVersion: 1;
+  readonly formatVersion: 2;
   readonly artifacts: {
-    readonly runtime: { readonly path: "catalog.ts"; readonly sha256: string };
-    readonly compiled: {
-      readonly path: "catalog.compiled.ts";
-      readonly sha256: string;
-    };
+    readonly runtime: Artifact<"catalog.ts">;
+    readonly compiled: Artifact<"catalog.compiled.ts">;
+    /** Lazy modules per root-key group; translations exist only for non-source locales. */
+    readonly groups: Readonly<
+      Record<
+        string,
+        {
+          readonly source: Artifact;
+          readonly translations: Readonly<Record<string, Artifact>>;
+        }
+      >
+    >;
   };
   readonly generation: string;
+}
+
+export interface CatalogArtifacts {
+  readonly manifest: CatalogManifest;
+  readonly runtime: string;
+  readonly compiled: string;
+  /** Verified group module contents keyed by their frontend-directory-relative path. */
+  readonly groups: Readonly<Record<string, string>>;
 }
 
 /** Byte-ordered compact UTF-8 JSON, matching PHP's unescaped Unicode/slash encoding. */
@@ -47,17 +68,39 @@ function ascii(value: unknown, label: string): asserts value is string {
     throw new Error(`Catalog ${label} must be a nonempty ASCII string.`);
 }
 
-/** Read one complete generation; no legacy manifest or stale-artifact fallback is accepted. */
+/**
+ * Read one complete generation; no legacy manifest or stale-artifact fallback is accepted. A
+ * compiler in another process may replace artifacts while they are read: when the manifest
+ * changed meanwhile, the newer generation gets exactly one more attempt.
+ */
 export function readCatalogManifest(
   directory: string,
   identity: CatalogIdentity,
-): { manifest: CatalogManifest; runtime: string; compiled: string } {
+): CatalogArtifacts {
   const manifestFile = path.join(directory, "catalog.build.json");
-  const raw = object(
-    JSON.parse(readFileSync(manifestFile, "utf8")),
-    "manifest",
-  );
-  if (raw.formatVersion !== 1)
+  const before = readFileSync(manifestFile, "utf8");
+  try {
+    return readGeneration(directory, identity, before);
+  } catch (error) {
+    let after: string;
+    try {
+      after = readFileSync(manifestFile, "utf8");
+    } catch {
+      throw error;
+    }
+    if (after === before) throw error;
+    return readGeneration(directory, identity, after);
+  }
+}
+
+function readGeneration(
+  directory: string,
+  identity: CatalogIdentity,
+  manifestText: string,
+): CatalogArtifacts {
+  const manifestFile = path.join(directory, "catalog.build.json");
+  const raw = object(JSON.parse(manifestText), "manifest");
+  if (raw.formatVersion !== 2)
     throw new Error(
       `Unsupported catalog formatVersion: ${String(raw.formatVersion)}.`,
     );
@@ -109,34 +152,74 @@ export function readCatalogManifest(
     }
   }
   const artifacts = object(raw.artifacts, "artifacts");
-  const contents = { runtime: "", compiled: "" };
   const realDirectory = realpathSync(directory);
   const paths = new Set<string>();
-  for (const mode of ["runtime", "compiled"] as const) {
-    const artifact = object(artifacts[mode], `${mode} artifact`);
-    const expected = mode === "runtime" ? "catalog.ts" : "catalog.compiled.ts";
-    if (
-      typeof artifact.path !== "string" ||
-      artifact.path !== expected ||
-      paths.has(artifact.path)
-    )
-      throw new Error(`Unsafe or duplicate catalog artifact path for ${mode}.`);
-    paths.add(artifact.path);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  // Every artifact path is fully determined by its role; the manifest only carries the digest.
+  function read(value: unknown, expected: string, label: string): string {
+    const artifact = object(value, `${label} artifact`);
+    if (artifact.path !== expected || paths.has(expected))
+      throw new Error(
+        `Unsafe or duplicate catalog artifact path for ${label}.`,
+      );
+    paths.add(expected);
     if (
       typeof artifact.sha256 !== "string" ||
       !digestPattern.test(artifact.sha256)
     )
-      throw new Error(`Invalid ${mode} artifact digest.`);
-    const file = realpathSync(path.join(directory, artifact.path));
-    if (path.dirname(file) !== realDirectory || paths.has(file))
+      throw new Error(`Invalid ${label} artifact digest.`);
+    const file = realpathSync(path.join(directory, expected));
+    if (
+      path.dirname(file) !== path.join(realDirectory, path.dirname(expected)) ||
+      paths.has(file)
+    )
       throw new Error(
-        `Unsafe or duplicate resolved catalog artifact path for ${mode}.`,
+        `Unsafe or duplicate resolved catalog artifact path for ${label}.`,
       );
     paths.add(file);
     const bytes = readFileSync(file);
     if (createHash("sha256").update(bytes).digest("hex") !== artifact.sha256)
-      throw new Error(`Catalog ${mode} artifact digest mismatch.`);
-    contents[mode] = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      throw new Error(`Catalog ${label} artifact digest mismatch.`);
+    return decoder.decode(bytes);
+  }
+  const runtime = read(artifacts.runtime, "catalog.ts", "runtime");
+  const compiled = read(artifacts.compiled, "catalog.compiled.ts", "compiled");
+  const groupArtifacts = object(artifacts.groups, "groups artifact");
+  const expectedGroups = [
+    ...new Set(Object.keys(texts).map(catalogGroup)),
+  ].sort();
+  const targets = (raw.locales as string[]).filter(
+    (locale) => locale !== raw.sourceLocale,
+  );
+  if (
+    JSON.stringify(Object.keys(groupArtifacts).sort()) !==
+    JSON.stringify(expectedGroups)
+  )
+    throw new Error("Catalog group artifacts do not match the catalog keys.");
+  const groups: Record<string, string> = {};
+  for (const group of expectedGroups) {
+    const artifact = object(groupArtifacts[group], `group ${group}`);
+    const source = `texts/${group}.ts`;
+    groups[source] = read(artifact.source, source, `group ${group} source`);
+    const translations = object(
+      artifact.translations,
+      `group ${group} translations`,
+    );
+    if (
+      JSON.stringify(Object.keys(translations).sort()) !==
+      JSON.stringify([...targets].sort())
+    )
+      throw new Error(
+        `Catalog group ${group} translations do not match the non-source locales.`,
+      );
+    for (const locale of targets) {
+      const file = `texts/${group}.${locale}.ts`;
+      groups[file] = read(
+        translations[locale],
+        file,
+        `group ${group} ${locale}`,
+      );
+    }
   }
   const { generation, ...payload } = raw;
   if (
@@ -154,5 +237,10 @@ export function readCatalogManifest(
   ) {
     throw new Error("Catalog generation changed while reading its artifacts.");
   }
-  return { manifest: raw as unknown as CatalogManifest, ...contents };
+  return {
+    manifest: raw as unknown as CatalogManifest,
+    runtime,
+    compiled,
+    groups,
+  };
 }

@@ -27,6 +27,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { textCatalog, type TextCatalogOptions } from "../src/vite/index.js";
 import type { TextCatalogSnapshot } from "../src/vite/types.js";
+import { catalogPreloadFiles } from "../src/preload.js";
 import { identity, publishCatalog } from "./fixtures.js";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -783,4 +784,314 @@ export function render() { return renderToString(createSSRApp(View)); }`,
       { timeout: 3000 },
     );
   }, 60000);
+});
+
+describe("split catalog groups", () => {
+  const trilingual = { ...identity, locales: ["en_US", "cs_CZ", "de_DE"] };
+  const texts = { "game.title": "Play", "shop.cart": "Cart" };
+  const translations: Record<string, Record<string, object>> = {
+    cs_CZ: {
+      game: { Play: { "game.title": "Hrát" } },
+      shop: { Cart: { "shop.cart": "Košík" } },
+    },
+    de_DE: {
+      game: { Play: { "game.title": "Spielen" } },
+      shop: { Cart: { "shop.cart": "Warenkorb" } },
+    },
+  };
+  const groupsModule = (source: boolean) => `export const catalogGroups = {
+${["game", "shop"]
+  .map(
+    (
+      group,
+    ) => `  ${group}: {${source ? `\n    source: () => import('./texts/${group}.js'),` : ""}
+    translations: {
+      cs_CZ: () => import('./texts/${group}.cs_CZ.js'),
+      de_DE: () => import('./texts/${group}.de_DE.js'),
+    },
+  },`,
+  )
+  .join("\n")}
+};
+export const sourceLocale = 'en_US' as const;
+export const locales = ['en_US', 'cs_CZ', 'de_DE'] as const;
+export type TextKey = "game.title" | "shop.cart";
+`;
+
+  async function app(
+    entry: string,
+    split?: TextCatalogOptions["split"],
+    mode: TextCatalogOptions["mode"] = "compiled",
+  ) {
+    const root = await mkdtemp(path.join(os.tmpdir(), "text-catalog-split-"));
+    cleanup.push(() => rm(root, { recursive: true, force: true }));
+    const write = async (file: string, content: string) => {
+      await mkdir(path.dirname(path.join(root, file)), { recursive: true });
+      await writeFile(path.join(root, file), content);
+    };
+    await symlink(
+      fileURLToPath(new URL("../node_modules", import.meta.url)),
+      path.join(root, "node_modules"),
+      "dir",
+    );
+    await write("copy-sources/game.neon", "");
+    await write(
+      "src/copy.ts",
+      `import * as generated from '../generated/catalog.js';
+import { createRuntimeCatalog } from 'lsr-text-catalog/runtime';
+// No loadTexts export: generated group modules load through the package.
+export const { langText, createCatalog, installCatalog, loadLocale } =
+  createRuntimeCatalog({ ...generated, htmlTextKeys: [] });
+`,
+    );
+    await write(
+      "src/copy.compiled.ts",
+      `import * as generated from '../generated/catalog.compiled.js';
+import { createCompiledCatalog } from 'lsr-text-catalog/compiled';
+export const { pgettext, npgettext, htmlPgettext, createCatalog, installCatalog, loadLocale } =
+  createCompiledCatalog(generated);
+`,
+    );
+    await write(
+      "src/game.ts",
+      `import { langText } from './copy';\nexport const label = () => langText('game.title');\n`,
+    );
+    await write(
+      "src/shop.ts",
+      `import { langText } from './copy';\nexport const label = () => langText('shop.cart');\n`,
+    );
+    await write("src/entry.ts", entry);
+    const compile = async () => {
+      await publishCatalog(
+        path.join(root, "generated"),
+        { texts, htmlKeys: {}, plurals: {} },
+        groupsModule(true),
+        `${groupsModule(false)}export declare function text(key: TextKey): string;\n`,
+        {
+          identity: trilingual,
+          files: Object.fromEntries(
+            Object.entries(translations).flatMap(([locale, groups]) =>
+              Object.entries(groups).map(([group, messages]) => [
+                `texts/${group}.${locale}.ts`,
+                `export default ${JSON.stringify(messages)};\n`,
+              ]),
+            ),
+          ),
+        },
+      );
+    };
+    const config = (ssr: boolean): InlineConfig => ({
+      configFile: false,
+      root,
+      logLevel: "silent",
+      publicDir: false,
+      plugins: [
+        textCatalog({
+          ...trilingual,
+          mode,
+          root,
+          compile,
+          split,
+          sourceDirectory: "copy-sources",
+          languageDirectory: "translations",
+          frontendDirectory: "generated",
+          facade: "src/copy.ts",
+          compiledFacade: "src/copy.compiled.ts",
+        }),
+      ],
+      resolve: {
+        alias: {
+          "lsr-text-catalog/runtime": fileURLToPath(
+            new URL("../src/runtime/index.ts", import.meta.url),
+          ),
+          "lsr-text-catalog/compiled": fileURLToPath(
+            new URL("../src/compiled/index.ts", import.meta.url),
+          ),
+        },
+      },
+      ssr: { noExternal: true, external: ["vue", "vue3-gettext"] },
+      build: {
+        ssr,
+        outDir: ssr ? "dist-ssr" : "dist",
+        minify: false,
+        rolldownOptions: {
+          input: path.join(root, "src/entry.ts"),
+          ...(ssr ? {} : { external: ["vue", "vue3-gettext"] }),
+          preserveEntrySignatures: "exports-only",
+        },
+      },
+    });
+    return { root, config };
+  }
+
+  const renderEntry = `import { createSSRApp } from 'vue';
+import { createCatalog, installCatalog, loadLocale } from './copy';
+export async function render(locale: string, page: 'game' | 'shop') {
+  await loadLocale(locale);
+  const module = page === 'game' ? await import('./game') : await import('./shop');
+  const app = createSSRApp({});
+  installCatalog(app, createCatalog({ locale }));
+  return app.runWithContext(() => module.label());
+}
+`;
+
+  // Chunk partition of the four translations: [cs game, cs shop, de game, de shop].
+  it.each([
+    ["split groups and locales", undefined, [1, 2, 3, 4]],
+    ["unsplit groups", { groups: false }, [1, 1, 2, 2]],
+    ["unsplit locales", { locales: false }, [1, 2, 1, 2]],
+    ["nothing split", { groups: false, locales: false }, [1, 1, 1, 1]],
+  ] as const)(
+    "bundles translations for %s and loads them before translated modules run",
+    async (_name, split, partition) => {
+      const { root, config } = await app(renderEntry, split);
+      await build(config(false));
+      const files = await readdir(path.join(root, "dist/assets"));
+      const contents = await Promise.all(
+        files.map((file) =>
+          readFile(path.join(root, "dist/assets", file), "utf8"),
+        ),
+      );
+      const chunkOf = (text: string | RegExp) => {
+        const holding = files.filter((_, index) =>
+          typeof text === "string"
+            ? contents[index]!.includes(text)
+            : text.test(contents[index]!),
+        );
+        expect(holding).toHaveLength(1);
+        return holding[0]!;
+      };
+      const chunks = ["Hrát", "Košík", "Spielen", "Warenkorb"].map(chunkOf);
+      // Same chunk exactly where the partition says so; never next to the page's source copy.
+      for (const [a, chunk] of chunks.entries())
+        for (const [b, other] of chunks.entries())
+          expect(chunk === other).toBe(partition[a] === partition[b]);
+      expect(chunks).not.toContain(
+        chunkOf(/pgettext\)?\(\s*"game\.title",\s*"Play"/u),
+      );
+      // Bundles are real chunks: no per-group/locale facade modules are left behind.
+      if (split)
+        expect(files.filter((file) => /^(game|shop)\./u.test(file))).toEqual(
+          [],
+        );
+
+      await build(config(true));
+      const [entry] = (await readdir(path.join(root, "dist-ssr"))).filter(
+        (file) => file.startsWith("entry."),
+      );
+      // Built output exists only after build(); its path cannot be imported statically.
+      const { render } = (await import(
+        path.join(root, "dist-ssr", entry!)
+      )) as {
+        render: (locale: string, page: string) => Promise<string>;
+      };
+      expect(await render("en_US", "game")).toBe("Play");
+      expect(await render("cs_CZ", "game")).toBe("Hrát");
+      expect(await render("de_DE", "shop")).toBe("Warenkorb");
+      expect(await render("cs_CZ", "shop")).toBe("Košík");
+    },
+    30000,
+  );
+
+  it("loads runtime-mode groups implicitly from literal keys and literal key maps", async () => {
+    const { root, config } = await app(renderEntry, undefined, "runtime");
+    // A finite dynamic selection; runtime mode keeps the lookup dynamic.
+    await writeFile(
+      path.join(root, "src/shop.ts"),
+      `import { langText } from './copy';
+const keys: Record<string, 'shop.cart'> = { cart: 'shop.cart' };
+export const label = (name = 'cart') => langText(keys[name]!);
+`,
+    );
+    await build(config(false));
+    const files = await readdir(path.join(root, "dist/assets"));
+    const contents = await Promise.all(
+      files.map((file) =>
+        readFile(path.join(root, "dist/assets", file), "utf8"),
+      ),
+    );
+    const holding = (pattern: RegExp) =>
+      files.filter((_, index) => pattern.test(contents[index]!));
+    // Source copy (group-relative keys) is split per group as well, away from the pages using it.
+    const game = holding(/"?title"?:\s*"Play"/u);
+    const shop = holding(/"?cart"?:\s*"Cart"/u);
+    expect(game).toHaveLength(1);
+    expect(shop).toHaveLength(1);
+    expect(game).not.toEqual(shop);
+
+    await build(config(true));
+    const [entry] = (await readdir(path.join(root, "dist-ssr"))).filter(
+      (file) => file.startsWith("entry."),
+    );
+    // Built output exists only after build(); its path cannot be imported statically.
+    const { render } = (await import(path.join(root, "dist-ssr", entry!))) as {
+      render: (locale: string, page: string) => Promise<string>;
+    };
+    expect(await render("en_US", "game")).toBe("Play");
+    expect(await render("cs_CZ", "game")).toBe("Hrát");
+    expect(await render("de_DE", "shop")).toBe("Warenkorb");
+  }, 30000);
+
+  it("starts every group of a chunk at once and emits a preload manifest", async () => {
+    const { root, config } = await app(`import { label as game } from './game';
+import { label as shop } from './shop';
+export const labels = () => [game(), shop()];
+`);
+    await build(config(false));
+    const assets = path.join(root, "dist/assets");
+    const files = await readdir(assets);
+    const contents: Record<string, string> = Object.fromEntries(
+      await Promise.all(
+        files.map(async (file) => [
+          file,
+          await readFile(path.join(assets, file), "utf8"),
+        ]),
+      ),
+    );
+    const loading = Object.values(contents).filter((code) =>
+      code.includes("loadCatalogGroups(catalogGroups"),
+    );
+    expect(loading).toHaveLength(1);
+    // Both group modules of the entry chunk carry the whole chunk's group list.
+    expect(
+      loading[0]!.match(/\["game", "shop"\]|\["game","shop"\]/gu),
+    ).toHaveLength(2);
+    expect(loading[0]).not.toContain("__LSR_TEXT_CATALOG_CHUNK_GROUPS__");
+
+    const manifest = JSON.parse(
+      await readFile(path.join(root, "dist/.vite/text-catalog.json"), "utf8"),
+    );
+    const preloads = catalogPreloadFiles(manifest, ["game", "shop"], "cs_CZ");
+    const preloaded = preloads.map(
+      (file) => contents[path.basename(file)] ?? "",
+    );
+    for (const text of ["Hrát", "Košík"])
+      expect(preloaded.some((code) => code.includes(text))).toBe(true);
+    expect(preloaded.some((code) => code.includes("Spielen"))).toBe(false);
+    // Compiled source-locale renders need no data at all.
+    expect(catalogPreloadFiles(manifest, ["game"], "en_US")).toEqual([]);
+  }, 30000);
+
+  it("rejects non-boolean split settings", () => {
+    expect(() =>
+      textCatalog({
+        ...trilingual,
+        compile: () => {},
+        split: { groups: "no" as never },
+        sourceDirectory: "copy",
+        languageDirectory: "languages",
+        frontendDirectory: "generated",
+        facade: "src/copy.ts",
+      }),
+    ).toThrow(/must be booleans/);
+  });
+
+  it("rejects group modules that the current generation does not contain", async () => {
+    const { config } = await app(
+      `import 'virtual:lsr-text-catalog/group/missing';\nexport const value = 1;\n`,
+    );
+    await expect(build(config(false))).rejects.toThrow(
+      /Unknown text catalog group "missing"/,
+    );
+  });
 });

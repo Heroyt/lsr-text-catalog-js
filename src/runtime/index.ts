@@ -1,50 +1,62 @@
 import { hasInjectionContext, inject, type App, type InjectionKey } from "vue";
-import { languageFactory } from "../language.js";
+import { createTextRegistry } from "../registry.js";
+
+/** @internal Entry point of the Vite plugin's generated group modules. */
+export { loadCatalogGroups } from "../registry.js";
 import type {
   CatalogHelpers,
   CatalogInstanceOptions,
   CatalogLanguageOptions,
+  CatalogLoading,
   InterpolationParameters,
   RuntimeCatalog,
+  RuntimeCatalogGroups,
 } from "../types.js";
 
 export type {
   CatalogHelpers,
   CatalogInstanceOptions,
   CatalogLanguageOptions,
+  CatalogLoading,
   RuntimeCatalog,
 } from "../types.js";
 
 export interface RuntimeCatalogOptions<
   Key extends string,
-> extends CatalogLanguageOptions {
-  readonly catalog: Readonly<Record<Key, string>>;
-  readonly htmlTextKeys: readonly NoInfer<Key>[];
+  Group extends string,
+  Locale extends string,
+> extends CatalogLanguageOptions<Locale> {
+  readonly catalogGroups: RuntimeCatalogGroups<Group>;
+  readonly htmlTextKeys: readonly Key[];
 }
 
 /** One consumer-local authoring facade; each createCatalog call creates independent app/request state. */
-export function createRuntimeCatalog<Key extends string>(
-  options: RuntimeCatalogOptions<Key>,
-) {
-  const createLanguage = languageFactory(options);
+export function createRuntimeCatalog<
+  Key extends string,
+  Group extends string,
+  Locale extends string,
+>(options: RuntimeCatalogOptions<Key, Group, Locale>) {
+  const registry = createTextRegistry(options, true);
+  const { loadTexts, loadLocale }: CatalogLoading<Group, Locale> = registry;
   const sanitizeHtml = options.sanitizeHtml;
-  const catalog = options.catalog;
-  const htmlKeys = new Set(options.htmlTextKeys);
+  const htmlKeys = new Set<string>(options.htmlTextKeys);
   const key: InjectionKey<CatalogHelpers<Key>> = Symbol("TextCatalog");
 
+  /** Source copy of a key whose group was loaded with loadTexts(). */
   function text(key: Key): string {
-    if (!Object.hasOwn(catalog, key))
-      throw new Error(`Unknown catalog key "${key}".`);
-    return catalog[key];
+    return registry.sourceText(key);
   }
 
   function createCatalog(
-    instance: CatalogInstanceOptions = {},
-  ): RuntimeCatalog<Key> {
-    const gettext = createLanguage(instance.locale);
+    instance: CatalogInstanceOptions<Locale> = {},
+    tracked = true,
+  ): RuntimeCatalog<Key, Locale> {
+    const gettext = registry.createLanguage(instance.locale, tracked);
     const sanitize = instance.sanitizeHtml ?? sanitizeHtml;
     function langText(key: Key, parameters?: InterpolationParameters): string {
-      return gettext.$pgettext(key, text(key), parameters);
+      const source = registry.sourceText(key);
+      registry.assertLoaded(gettext, key);
+      return gettext.$pgettext(key, source, parameters);
     }
     function langTextPlural(
       singularKey: Extract<Key, `${string}.one`>,
@@ -58,13 +70,10 @@ export function createRuntimeCatalog<Key extends string>(
           'Catalog plural keys must be sibling ".one" and ".plural" entries.',
         );
       }
-      return gettext.$npgettext(
-        context,
-        text(singularKey),
-        text(pluralKey),
-        count,
-        parameters,
-      );
+      const singular = registry.sourceText(singularKey);
+      const plural = registry.sourceText(pluralKey);
+      registry.assertLoaded(gettext, context);
+      return gettext.$npgettext(context, singular, plural, count, parameters);
     }
     function langHtmlText(
       key: Key,
@@ -78,7 +87,14 @@ export function createRuntimeCatalog<Key extends string>(
         );
       return sanitize(langText(key, parameters));
     }
-    return { gettext, langText, langTextPlural, langHtmlText };
+    return {
+      gettext,
+      langText,
+      langTextPlural,
+      langHtmlText,
+      setLocale: (locale) => registry.setLocale(gettext, locale),
+      usedGroups: () => registry.usedGroups(gettext),
+    };
   }
 
   // Do not expose or install the source translator: its locale must remain fixed.
@@ -86,7 +102,7 @@ export function createRuntimeCatalog<Key extends string>(
     langText: sourceText,
     langTextPlural: sourcePlural,
     langHtmlText: sourceHtml,
-  } = createCatalog();
+  } = createCatalog({}, false);
   const source = Object.freeze({
     langText: sourceText,
     langTextPlural: sourcePlural,
@@ -95,7 +111,10 @@ export function createRuntimeCatalog<Key extends string>(
   function current(): CatalogHelpers<Key> {
     return hasInjectionContext() ? inject(key, source) : source;
   }
-  function installCatalog(app: App, catalog: RuntimeCatalog<Key>): void {
+  function installCatalog(
+    app: App,
+    catalog: RuntimeCatalog<Key, Locale>,
+  ): void {
     app.provide(key, catalog);
     app.config.globalProperties.$langText = catalog.langText;
     app.config.globalProperties.$langTextPlural = catalog.langTextPlural;
@@ -117,8 +136,11 @@ export function createRuntimeCatalog<Key extends string>(
     langText,
     langTextPlural,
     langHtmlText,
-    createCatalog,
+    createCatalog: (instance?: CatalogInstanceOptions<Locale>) =>
+      createCatalog(instance),
     installCatalog,
+    loadTexts,
+    loadLocale,
   };
 }
 

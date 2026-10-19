@@ -9,6 +9,7 @@ import {
   writeFileSync,
   type FSWatcher,
 } from "node:fs";
+import MagicString from "magic-string";
 import path from "node:path";
 import {
   isRunnableDevEnvironment,
@@ -17,7 +18,11 @@ import {
   type ViteDevServer,
 } from "vite";
 
-import { transformTextCatalog } from "./transform.js";
+import {
+  groupModulePrefix,
+  importLiteralKeyGroups,
+  transformTextCatalog,
+} from "./transform.js";
 import type {
   CatalogIdentity,
   TextCatalogSnapshot,
@@ -39,15 +44,30 @@ export interface TextCatalogOptions extends CatalogIdentity {
   facade: string;
   /** Required in compiled mode; exports createCatalog/installCatalog and gettext adapters. */
   compiledFacade?: string;
-  /** Compile and publish all format-v1 artifacts. The host owns process/env/bootstrap choices. */
+  /** Compile and publish all format-2 artifacts. The host owns process/env/bootstrap choices. */
   compile: (root: string) => void | Promise<void>;
+  /**
+   * Lazy-loading granularity; both default to `true`. `groups: false` delivers all groups of a
+   * locale in one module; `locales: false` delivers all locales of a group in one module (instant
+   * locale switching). Both `false`: one module holds every translation.
+   */
+  split?: { readonly groups?: boolean; readonly locales?: boolean };
 }
 
 interface PublishedCatalog {
   revision: string;
   snapshot: TextCatalogSnapshot;
   frontend: string;
+  /** Verified lazy group modules keyed by frontend-directory-relative path. */
+  groups: Readonly<Record<string, string>>;
 }
+
+const groupModuleId = `\0${groupModulePrefix}`;
+// Modules bundling several generated `texts/` modules when splitting is disabled.
+const bundleModuleId = "\0lsr-text-catalog/bundle/";
+// Placeholder argument of group modules, replaced per output chunk by renderChunk().
+const chunkGroupsToken = "__LSR_TEXT_CATALOG_CHUNK_GROUPS__";
+const chunkGroupsPattern = new RegExp(`(["'\`])${chunkGroupsToken}\\1`, "gu");
 
 function isWithin(directory: string, file: string): boolean {
   const relative = path.relative(directory, file);
@@ -76,6 +96,10 @@ export function textCatalog(options: TextCatalogOptions): Plugin {
   ] as const) {
     if (!options[name]) throw new Error(`textCatalog requires ${name}.`);
   }
+  const splitGroups = options.split?.groups ?? true;
+  const splitLocales = options.split?.locales ?? true;
+  if (typeof splitGroups !== "boolean" || typeof splitLocales !== "boolean")
+    throw new Error("textCatalog split.groups/split.locales must be booleans.");
   const identity: CatalogIdentity = {
     domain: options.domain,
     sourceLocale: options.sourceLocale,
@@ -131,6 +155,9 @@ export function textCatalog(options: TextCatalogOptions): Plugin {
     return {
       root,
       facade: normalizePath(facadeFile),
+      groupImports: identity.locales.some(
+        (locale) => locale !== identity.sourceLocale,
+      ),
       async resolveModule(source, importer) {
         const resolved = await resolve(source, importer);
         if (!resolved || /[?#\0]/u.test(resolved.id)) return undefined;
@@ -141,6 +168,44 @@ export function textCatalog(options: TextCatalogOptions): Plugin {
         return undefined;
       },
     };
+  }
+
+  /** Compiled mode expands literal calls; runtime mode only imports the groups of literal keys. */
+  function expandSource(
+    source: string,
+    id: string,
+    snapshot: TextCatalogSnapshot,
+    resolve: Parameters<typeof transformOptions>[0],
+  ) {
+    return mode === "compiled"
+      ? transformTextCatalog(source, id, snapshot, transformOptions(resolve))
+      : importLiteralKeyGroups(source, id, snapshot);
+  }
+
+  /** Modules whose bytes come from the validated generation instead of the filesystem. */
+  function isCatalogArtifact(file: string): boolean {
+    return (
+      file === frontendFile ||
+      file === compiledFrontendFile ||
+      isWithin(path.join(frontendDirectory, "texts"), file)
+    );
+  }
+
+  /** `texts/<group>.ts` or `texts/<group>.<locale>.ts`; groups never contain a dot. */
+  function textsModule(relative: string): { group: string; locale?: string } {
+    const name = relative.slice("texts/".length, -".ts".length);
+    const dot = name.indexOf(".");
+    return dot < 0
+      ? { group: name }
+      : { group: name.slice(0, dot), locale: name.slice(dot + 1) };
+  }
+
+  /** Bundle delivering a generated `texts/` module when a dimension is not split. */
+  function bundleOf(relative: string): string {
+    if (!splitGroups && !splitLocales) return "all";
+    const { group, locale } = textsModule(relative);
+    if (!splitLocales) return `group/${group}`;
+    return locale === undefined ? "sources" : `locale/${locale}`;
   }
 
   function isGenerated(file: string): boolean {
@@ -324,12 +389,13 @@ export function textCatalog(options: TextCatalogOptions): Plugin {
         const artifacts = readCatalogManifest(frontendDirectory, identity);
         const snapshot = artifacts.manifest;
         const frontend = artifacts[mode];
+        const groups = artifacts.groups;
         // A compile can overlap edits even before a watcher delivers its event. Never publish it then.
         if (scan() !== revision) continue;
         dirty = false;
         const initial = !published && !failure;
         failure = undefined;
-        published = { revision, snapshot, frontend };
+        published = { revision, snapshot, frontend, groups };
         // Startup watcher events for unchanged inputs must not reset an already mounted app.
         if (initial) lastReloaded = published;
         return published;
@@ -401,7 +467,7 @@ export function textCatalog(options: TextCatalogOptions): Plugin {
                 : existing
                   ? [existing]
                   : []),
-              `${normalizePath(path.resolve(realpathSync(configuredRoot), options.frontendDirectory))}/*.{ts,json,php}`,
+              `${normalizePath(path.resolve(realpathSync(configuredRoot), options.frontendDirectory))}/**/*.{ts,json,php}`,
               `${normalizePath(path.resolve(realpathSync(configuredRoot), options.languageDirectory))}/**/*.{po,pot,mo}`,
             ],
           },
@@ -441,48 +507,44 @@ export function textCatalog(options: TextCatalogOptions): Plugin {
       }
       revisionFile = path.join(frontendDirectory, "catalog.watch");
       watchBuild = config.command === "build" && !!config.build.watch;
-      if (mode === "compiled") {
-        const vue = config.plugins.find((plugin) => plugin.name === "vite:vue");
-        const hook = vue?.handleHotUpdate;
-        if (vue && hook) {
-          const handler = typeof hook === "function" ? hook : hook.handler;
-          // Vite keeps modern hotUpdate and legacy handleHotUpdate contexts separate.
-          // Vue must compare the same preprocessed SFCs that its transform cached.
-          const wrapped: typeof handler = function (context) {
-            if (
-              !isSource(canonicalFile(context.file)) ||
-              !context.file.endsWith(".vue")
-            )
-              return handler.call(this, context);
-            const read = context.read;
-            return handler.call(this, {
-              ...context,
-              read: async () => {
-                const source = await read();
-                const next = await current();
-                return (
-                  (
-                    await transformTextCatalog(
-                      source,
-                      canonicalFile(context.file),
-                      next.snapshot,
-                      transformOptions((source, importer) =>
-                        context.server.environments.client!.pluginContainer.resolveId(
-                          source,
-                          importer,
-                        ),
+      // Both modes rewrite SFC sources; Vue's HMR must compare the same preprocessed SFCs.
+      const vue = config.plugins.find((plugin) => plugin.name === "vite:vue");
+      const hook = vue?.handleHotUpdate;
+      if (vue && hook) {
+        const handler = typeof hook === "function" ? hook : hook.handler;
+        // Vite keeps modern hotUpdate and legacy handleHotUpdate contexts separate.
+        // Vue must compare the same preprocessed SFCs that its transform cached.
+        const wrapped: typeof handler = function (context) {
+          if (
+            !isSource(canonicalFile(context.file)) ||
+            !context.file.endsWith(".vue")
+          )
+            return handler.call(this, context);
+          const read = context.read;
+          return handler.call(this, {
+            ...context,
+            read: async () => {
+              const source = await read();
+              const next = await current();
+              return (
+                (
+                  await expandSource(
+                    source,
+                    canonicalFile(context.file),
+                    next.snapshot,
+                    (source, importer) =>
+                      context.server.environments.client!.pluginContainer.resolveId(
+                        source,
+                        importer,
                       ),
-                    )
-                  )?.code ?? source
-                );
-              },
-            });
-          };
-          vue.handleHotUpdate =
-            typeof hook === "function"
-              ? wrapped
-              : { ...hook, handler: wrapped };
-        }
+                  )
+                )?.code ?? source
+              );
+            },
+          });
+        };
+        vue.handleHotUpdate =
+          typeof hook === "function" ? wrapped : { ...hook, handler: wrapped };
       }
     },
     configureServer(devServer) {
@@ -550,6 +612,26 @@ export function textCatalog(options: TextCatalogOptions): Plugin {
       sourceWatchers.clear();
     },
     async resolveId(source, importer) {
+      // Compiled call sites import these; each top-level-awaits its group before the importer runs.
+      if (source.startsWith(groupModulePrefix)) return `\0${source}`;
+      // Unsplit dimensions: generated loaders of one bundle all resolve to the same module/chunk.
+      if (
+        importer &&
+        !(splitGroups && splitLocales) &&
+        source.startsWith("./texts/") &&
+        [frontendFile, compiledFrontendFile].includes(canonicalFile(importer))
+      ) {
+        const resolved = await this.resolve(source, importer, {
+          skipSelf: true,
+        });
+        const relative =
+          resolved &&
+          normalizePath(
+            path.relative(frontendDirectory, canonicalFile(resolved.id)),
+          );
+        if (relative?.startsWith("texts/"))
+          return `${bundleModuleId}${bundleOf(relative)}`;
+      }
       if (mode !== "compiled" || source.includes("\0") || /[?#]/.test(source))
         return null;
       const resolved = await this.resolve(source, importer, { skipSelf: true });
@@ -568,37 +650,96 @@ export function textCatalog(options: TextCatalogOptions): Plugin {
       if (file === revisionFile || isCatalogInput(file)) markDirty();
     },
     async load(id) {
-      if (
-        canonicalFile(id) !== frontendFile &&
-        canonicalFile(id) !== compiledFrontendFile
-      )
-        return null;
+      if (id.startsWith(groupModuleId)) {
+        const group = id.slice(groupModuleId.length);
+        const next = server
+          ? await current()
+          : (buildCatalog ?? (await current()));
+        if (!Object.hasOwn(next.groups, `texts/${group}.ts`))
+          this.error(`Unknown text catalog group ${JSON.stringify(group)}.`);
+        // The facade import creates its registry first; the shared generated `catalogGroups`
+        // object identifies it, so facades need not export a loading function. renderChunk()
+        // replaces the token with every group of the output chunk (see loadCatalogGroups).
+        const [facade, catalog] =
+          mode === "compiled"
+            ? [compiledFacadeFile, compiledFrontendFile]
+            : [facadeFile, frontendFile];
+        return `import ${JSON.stringify(normalizePath(facade))};
+import { catalogGroups } from ${JSON.stringify(normalizePath(catalog))};
+import { loadCatalogGroups } from ${JSON.stringify(`lsr-text-catalog/${mode}`)};
+await loadCatalogGroups(catalogGroups, [${JSON.stringify(group)}], ${JSON.stringify(chunkGroupsToken)});
+`;
+      }
+      if (id.startsWith(bundleModuleId)) {
+        const bundle = id.slice(bundleModuleId.length);
+        const next = server
+          ? await current()
+          : (buildCatalog ?? (await current()));
+        // Compiled mode inlines source copy at call sites; never bundle the source modules there.
+        const members = Object.keys(next.groups)
+          .sort()
+          .filter(
+            (relative) =>
+              bundleOf(relative) === bundle &&
+              (mode === "runtime" ||
+                textsModule(relative).locale !== undefined),
+          );
+        if (!members.length)
+          this.error(`Unknown text catalog bundle ${JSON.stringify(bundle)}.`);
+        const sources: string[] = [];
+        const translations: Record<string, string[]> = {};
+        const imports = members.map((relative, index) => {
+          const { group, locale } = textsModule(relative);
+          const entry = `${JSON.stringify(group)}: m${index}`;
+          if (locale === undefined) sources.push(entry);
+          else (translations[locale] ??= []).push(entry);
+          return `import m${index} from ${JSON.stringify(normalizePath(path.join(frontendDirectory, relative)))};`;
+        });
+        return `${imports.join("\n")}
+export const sources = { ${sources.join(", ")} };
+export const translations = { ${Object.entries(translations)
+          .map(
+            ([locale, entries]) =>
+              `${JSON.stringify(locale)}: { ${entries.join(", ")} }`,
+          )
+          .join(", ")} };
+`;
+      }
+      const file = canonicalFile(id);
+      if (!isCatalogArtifact(file)) return null;
       const next = server
         ? await current()
         : (buildCatalog ?? (await current()));
       for (const file of server ? sourceFiles : dependencies)
         this.addWatchFile(file);
-      return next.frontend;
+      if (file === frontendFile || file === compiledFrontendFile)
+        return next.frontend;
+      const relative = normalizePath(path.relative(frontendDirectory, file));
+      // Serve only verified bytes of the current generation, never a stale or foreign file.
+      if (!Object.hasOwn(next.groups, relative))
+        this.error(
+          `${relative} is not part of the current text catalog generation.`,
+        );
+      return next.groups[relative];
     },
     async transform(source, id) {
       id = canonicalFile(id);
-      if (id === frontendFile || id === compiledFrontendFile) {
+      if (isCatalogArtifact(id)) {
         // Generated translations also depend on catalog inputs, despite being excluded from output watches.
         for (const file of server ? sourceFiles : dependencies)
           this.addWatchFile(file);
         return null;
       }
-      if (mode === "runtime" || !isSource(id)) return null;
+      if (!isSource(id)) return null;
       const next = server
         ? await current()
         : (buildCatalog ?? (await current()));
-      const result = await transformTextCatalog(
+      const result = await expandSource(
         source,
         id,
         next.snapshot,
-        transformOptions((source, importer) =>
+        (source, importer) =>
           this.resolve(source, importer, { skipSelf: true }),
-        ),
       );
       if (result !== null) {
         // Rolldown 1.2 does not implement shouldTransformCachedModule. These transform dependencies
@@ -609,6 +750,66 @@ export function textCatalog(options: TextCatalogOptions): Plugin {
           this.addWatchFile(file);
       }
       return result;
+    },
+    renderChunk(code, chunk) {
+      if (!code.includes(chunkGroupsToken)) return null;
+      // Bundled modules await one after another: let the first group module of this chunk
+      // load the groups of all of them in parallel.
+      const groups = JSON.stringify(
+        chunk.moduleIds
+          .filter((id) => id.startsWith(groupModuleId))
+          .map((id) => id.slice(groupModuleId.length))
+          .sort(),
+      );
+      const output = new MagicString(code);
+      for (const match of code.matchAll(chunkGroupsPattern))
+        output.overwrite(match.index, match.index + match[0].length, groups);
+      return {
+        code: output.toString(),
+        map: output.generateMap({ hires: true }),
+      };
+    },
+    generateBundle(_options, bundle) {
+      if (server || this.environment.config.consumer !== "client") return;
+      // Preload manifest: build files (relative to outDir) delivering each group's modules.
+      const groups: Record<
+        string,
+        { source?: string[]; translations: Record<string, string[]> }
+      > = {};
+      const textsDirectory = path.join(frontendDirectory, "texts");
+      function withImports(fileName: string, files = new Set<string>()) {
+        if (files.has(fileName)) return files;
+        files.add(fileName);
+        const output = bundle[fileName];
+        if (output?.type === "chunk")
+          for (const imported of output.imports) withImports(imported, files);
+        return files;
+      }
+      for (const output of Object.values(bundle)) {
+        if (output.type !== "chunk") continue;
+        const ids = output.facadeModuleId
+          ? [output.facadeModuleId, ...output.moduleIds]
+          : output.moduleIds;
+        for (const id of new Set(ids)) {
+          const file = canonicalFile(id);
+          if (!isWithin(textsDirectory, file)) continue;
+          const { group, locale } = textsModule(
+            normalizePath(path.relative(frontendDirectory, file)),
+          );
+          const entry = (groups[group] ??= { translations: {} });
+          const files =
+            locale === undefined
+              ? (entry.source ??= [])
+              : (entry.translations[locale] ??= []);
+          for (const fileName of withImports(output.fileName))
+            if (!files.includes(fileName)) files.push(fileName);
+        }
+      }
+      this.emitFile({
+        type: "asset",
+        fileName: ".vite/text-catalog.json",
+        source: `${JSON.stringify({ groups }, null, 2)}\n`,
+      });
     },
     hotUpdate: {
       order: "pre",
